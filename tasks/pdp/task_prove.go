@@ -182,12 +182,18 @@ func (p *ProveTask) Do(taskID harmonytask.TaskID, stillOwned func() bool) (done 
 	}
 
 	// Proof parameters
-	challengeEpoch, err := pdpVerifier.GetNextChallengeEpoch(callOpts, big.NewInt(proofSetID))
+	challengeEpochBig, err := pdpVerifier.GetNextChallengeEpoch(callOpts, big.NewInt(proofSetID))
 	if err != nil {
 		return false, xerrors.Errorf("failed to get next challenge epoch: %w", err)
 	}
 
-	seed, err := p.fil.StateGetRandomnessDigestFromBeacon(ctx, abi.ChainEpoch(challengeEpoch.Int64()), chainTypes.EmptyTSK)
+	log.Infow("DEBUG: Starting PDP proof generation",
+		"proof_set_id", proofSetID,
+		"challenge_epoch", challengeEpochBig.Int64(),
+		"task_id", taskID,
+	)
+
+	seed, err := p.fil.StateGetRandomnessDigestFromBeacon(ctx, abi.ChainEpoch(challengeEpochBig.Int64()), chainTypes.EmptyTSK)
 	if err != nil {
 		return false, xerrors.Errorf("failed to get chain randomness from beacon for pdp prove: %w", err)
 	}
@@ -318,6 +324,12 @@ func (p *ProveTask) GenerateProofs(ctx context.Context, pdpService *contract.PDP
 	for i := 0; i < numChallenges; i++ {
 		root := rootId[i]
 
+		log.Infow("DEBUG: Found root for challenge",
+			"challenge_index", challenges[i],
+			"root_id", root.RootId.Int64(),
+			"leaf_within_root", root.Offset.Int64(),
+		)
+
 		proof, err := p.proveRoot(ctx, proofSetID, root.RootId.Int64(), root.Offset.Int64())
 		if err != nil {
 			return nil, xerrors.Errorf("failed to prove root %d (%d, %d, %d): %w", i, proofSetID, root.RootId.Int64(), root.Offset.Int64(), err)
@@ -370,6 +382,15 @@ func generateChallengeIndex(seed abi.Randomness, proofSetID int64, proofIndex in
 		"hashInt", hashInt,
 		"totalLeavesBigInt", totalLeavesBigInt,
 		"challengeIndex", challengeIndex,
+	)
+
+	log.Infow("DEBUG: Generated challenge index",
+		"seed_hex", hex.EncodeToString(seed),
+		"proof_set_id", proofSetID,
+		"proof_index", proofIndex,
+		"total_leaves", totalLeaves,
+		"challenge_index", challengeIndex.String(),
+		"keccak_input", hex.EncodeToString(hashBytes),
 	)
 
 	return challengeIndex.Int64()
@@ -636,6 +657,23 @@ func (p *ProveTask) proveRoot(ctx context.Context, proofSetID int64, rootId int6
 	if !Verify(out, cr, uint64(challengedLeaf)) {
 		return contract.PDPVerifierProof{}, xerrors.Errorf("proof verification failed")
 	}
+
+	log.Infow("DEBUG: Generated merkle proof",
+		"root_id", rootId,
+		"challenge_index", challengedLeaf,
+		"leaf_index", subrootChallengedLeaf,
+		"leaf_data", hex.EncodeToString(out.Leaf[:]),
+		"proof_path_count", len(out.Proof),
+		"proof_path", func() []string {
+			paths := make([]string, len(out.Proof))
+			for i, p := range out.Proof {
+				paths[i] = hex.EncodeToString(p[:])
+			}
+			return paths
+		}(),
+		"root_hash", hex.EncodeToString(cr[:]),
+		"subroot_count", len(subroots),
+	)
 
 	// Return the completed proof
 	return out, nil
