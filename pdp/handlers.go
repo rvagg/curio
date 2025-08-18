@@ -550,12 +550,12 @@ func (p *PDPService) handleGetDataSet(w http.ResponseWriter, r *http.Request) {
 	for _, piece := range pieces {
 		// TODO: this could be cached per piece since we do this for every sub-piece
 		psize := pieceSize[piece.PieceCid]
-		pcv2, err := asPieceCIDv2(piece.PieceCid, uint64(psize))
+		pcv2, _, err := asPieceCIDv2(piece.PieceCid, uint64(psize))
 		if err != nil {
 			http.Error(w, "Invalid PieceCID: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		spcv2, err := asPieceCIDv2(piece.SubPieceCID, uint64(piece.SubPieceSize))
+		spcv2, _, err := asPieceCIDv2(piece.SubPieceCID, uint64(piece.SubPieceSize))
 		if err != nil {
 			http.Error(w, "Invalid SubPieceCID: "+err.Error(), http.StatusBadRequest)
 			return
@@ -1457,13 +1457,32 @@ func asPieceCIDv1(cidStr string) (cid.Cid, error) {
 	return pieceCid, nil
 }
 
-func asPieceCIDv2(cidStr string, size uint64) (cid.Cid, error) {
+// asPieceCIDv2 converts a string to a PieceCIDv2. Where the input is expected to be a PieceCIDv1,
+// a size argument is required. Where it's expected to be a v2, the size argument is ignored. The
+// size either derived from the v2 or from the size argument in the case of a v1 is returned.
+func asPieceCIDv2(cidStr string, size uint64) (cid.Cid, uint64, error) {
 	pieceCid, err := cid.Decode(cidStr)
 	if err != nil {
-		return cid.Undef, fmt.Errorf("failed to decode subPieceCid: %w", err)
+		return cid.Undef, 0, fmt.Errorf("failed to decode subPieceCid: %w", err)
 	}
-	if pieceCid.Prefix().MhType == uint64(multicodec.Sha2_256Trunc254Padded) {
-		return commcid.PieceCidV2FromV1(pieceCid, size)
+	switch pieceCid.Prefix().MhType {
+	case uint64(multicodec.Sha2_256Trunc254Padded):
+		if size == 0 {
+			return cid.Undef, 0, fmt.Errorf("size must be provided for PieceCIDv1")
+		}
+		c, err := commcid.PieceCidV2FromV1(pieceCid, size)
+		if err != nil {
+			return cid.Undef, 0, err
+		}
+		return c, size, nil
+	case uint64(multicodec.Fr32Sha256Trunc254Padbintree):
+		// get the size from the CID, not the argument
+		_, size, err := commcid.PieceCidV2ToDataCommitment(pieceCid)
+		if err != nil {
+			return cid.Undef, 0, err
+		}
+		return pieceCid, size, nil
+	default:
+		return cid.Undef, 0, fmt.Errorf("unsupported piece CID type: %d", pieceCid.Prefix().MhType)
 	}
-	return pieceCid, nil
 }
