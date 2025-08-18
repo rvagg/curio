@@ -193,7 +193,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req struct {
-		PieceCID string `json:"cid"`
+		PieceCID string `json:"pieceCid"`
 		Notify   string `json:"notify,omitempty"`
 	}
 	if err = json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -488,7 +488,7 @@ func (p *PDPService) handleFindPiece(w http.ResponseWriter, r *http.Request) {
 
 	// Parse query parameters
 
-	cidStr := r.URL.Query().Get("cid")
+	cidStr := r.URL.Query().Get("pieceCid")
 	pieceCidV2, _, err := asPieceCIDv2(cidStr, 0)
 	if err != nil {
 		http.Error(w, "Failed to parse CID: "+err.Error(), http.StatusBadRequest)
