@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/go-chi/chi/v5"
 	"github.com/ipfs/go-cid"
+	"github.com/multiformats/go-multicodec"
 	"github.com/yugabyte/pgx/v5"
 
 	"github.com/filecoin-project/go-commp-utils/nonffi"
@@ -626,12 +627,12 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 
 	// Step 3: Parse the request body
 	type SubPieceEntry struct {
-		SubPieceCIDv2 string `json:"subPieceCid"`
+		SubPieceCID   string `json:"subPieceCid"`
 		subPieceCIDv1 string
 	}
 
 	type AddPieceRequest struct {
-		PieceCIDv2 string `json:"pieceCid"`
+		PieceCID   string `json:"pieceCid"`
 		pieceCIDv1 string
 		SubPieces  []SubPieceEntry `json:"subPieces"`
 	}
@@ -669,8 +670,8 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 
 	// Collect all subPieceCids to fetch their info in a batch
 	subPieceCidSet := make(map[string]struct{})
-	for _, addPieceReq := range payload.Pieces {
-		if addPieceReq.PieceCIDv2 == "" {
+	for i, addPieceReq := range payload.Pieces {
+		if addPieceReq.PieceCID == "" {
 			http.Error(w, "PieceCID is required for each piece", http.StatusBadRequest)
 			return
 		}
@@ -680,22 +681,18 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			return
 		}
 
-		for i, subPieceEntry := range addPieceReq.SubPieces {
-			if subPieceEntry.SubPieceCIDv2 == "" {
+		for _, subPieceEntry := range addPieceReq.SubPieces {
+			if subPieceEntry.SubPieceCID == "" {
 				http.Error(w, "subPieceCid is required for each subPiece", http.StatusBadRequest)
 				return
 			}
-			pieceCidV2, err := cid.Decode(subPieceEntry.SubPieceCIDv2)
+			pieceCid, err := asPieceCIDv1(subPieceEntry.SubPieceCID)
 			if err != nil {
-				http.Error(w, "Invalid SubPieceCid: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			pieceCid, _, err := commcid.PieceCidV1FromV2(pieceCidV2)
-			if err != nil {
-				http.Error(w, "Invalid SubCommPv2:"+err.Error(), http.StatusBadRequest)
+				http.Error(w, "Invalid SubPiece:"+err.Error(), http.StatusBadRequest)
 				return
 			}
 			pieceCidString := pieceCid.String()
+
 			addPieceReq.SubPieces[i].subPieceCIDv1 = pieceCidString // save it for to query subPieceInfoMap later
 
 			if _, exists := subPieceCidSet[pieceCidString]; exists {
@@ -808,13 +805,9 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			}
 
 			// Compare generated PieceCid with provided PieceCid
-			providedPieceCidv2, err := cid.Decode(addPieceReq.PieceCIDv2)
+			providedPieceCidv1, err := asPieceCIDv1(addPieceReq.PieceCID)
 			if err != nil {
 				return false, fmt.Errorf("invalid provided PieceCid: %v", err)
-			}
-			providedPieceCidv1, _, err := commcid.PieceCidV1FromV2(providedPieceCidv2)
-			if err != nil {
-				return false, fmt.Errorf("invalid provided PieceCIDv2: %v", err)
 			}
 			payload.Pieces[i].pieceCIDv1 = providedPieceCidv1.String()
 
@@ -849,7 +842,7 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 
 	for _, addPieceReq := range payload.Pieces {
 		// Convert PieceCid to bytes
-		pieceCidV2, err := cid.Decode(addPieceReq.PieceCIDv2)
+		pieceCidV2, err := cid.Decode(addPieceReq.PieceCID)
 		if err != nil {
 			http.Error(w, "Invalid PieceCid: "+err.Error(), http.StatusBadRequest)
 			return
@@ -875,7 +868,7 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			subPieceInfo := subPieceInfoMap[subPieceEntry.subPieceCIDv1]
 			if subPieceInfo.PaddedSize > prevSubPieceSize {
 				msg := fmt.Sprintf("SubPieces must be in descending order of size, piece %d %s is larger than prev subPiece %s",
-					i, subPieceEntry.SubPieceCIDv2, addPieceReq.SubPieces[i-1].SubPieceCIDv2)
+					i, subPieceEntry.SubPieceCID, addPieceReq.SubPieces[i-1].SubPieceCID)
 				http.Error(w, msg, http.StatusBadRequest)
 				return
 			}
@@ -1426,4 +1419,16 @@ func (p *PDPService) handleGetDataSetPiece(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Failed to encode response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func asPieceCIDv1(cidStr string) (cid.Cid, error) {
+	pieceCid, err := cid.Decode(cidStr)
+	if err != nil {
+		return cid.Undef, fmt.Errorf("failed to decode subPieceCid: %w", err)
+	}
+	if pieceCid.Prefix().MhType == uint64(multicodec.Fr32Sha256Trunc254Padbintree) {
+		c1, _, err := commcid.PieceCidV1FromV2(pieceCid)
+		return c1, err
+	}
+	return pieceCid, nil
 }
