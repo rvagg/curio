@@ -901,10 +901,11 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 		}
 
 		// sanity check that height and totalSize match
-		paddedTotalSize := abi.UnpaddedPieceSize(totalSize).Padded()
-		computedHeight := bits.LeadingZeros64(uint64(paddedTotalSize)-1) - 5
+		// paddedTotalSize := abi.UnpaddedPieceSize(totalSize).Padded()
+		fr32DataSize := totalSize * 128 / 127
+		computedHeight := bits.LeadingZeros64(uint64(fr32DataSize)-1) - 5
 		if computedHeight != int(height) {
-			http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d for total size %d", computedHeight, height, totalSize), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d for total size %d, expanded to %d", computedHeight, height, totalSize, fr32DataSize), http.StatusBadRequest)
 		}
 
 		// Prepare PieceData for Ethereum transaction
