@@ -21,7 +21,6 @@ import (
 	"github.com/multiformats/go-multicodec"
 	"github.com/multiformats/go-multihash"
 	mhreg "github.com/multiformats/go-multihash/core"
-	"github.com/snadrus/must"
 	"github.com/yugabyte/pgx/v5"
 
 	commcid "github.com/filecoin-project/go-fil-commcid"
@@ -45,7 +44,7 @@ type PieceHash struct {
 	// sha2-256 - Blob sha256
 	Name string `json:"name"`
 
-	// hex encoded hash
+	// Hash is a hex encoded hash
 	Hash string `json:"hash"`
 
 	// Size of the piece in bytes
@@ -58,15 +57,24 @@ func (ph *PieceHash) Set() bool {
 
 func (ph *PieceHash) HashName() string {
 	if ph.Name == multicodec.Fr32Sha256Trunc254Padbintree.String() {
-		return multicodec.Sha2_256Trunc254Padded.String()
+		return multicodec.Sha2_256Trunc254Padded.String() // let's pretend
 	}
 	return ph.Name
 }
 
-func (ph *PieceHash) mh() (multihash.Multihash, error) {
-	_, ok := multihash.Names[ph.HashName()]
-	if !ok {
-		return nil, fmt.Errorf("hash function name not recognized: %s", ph.HashName())
+// mhNative returns the Multihash representation of the piece hash. Unlike mh() it does not perform
+// a translation between CommPv2 and CommPv1.
+func (ph *PieceHash) mhNative() (multihash.Multihash, error) {
+	var code multicodec.Code
+	switch ph.Name {
+	case multicodec.Sha2_256Trunc254Padded.String():
+		code = multicodec.Sha2_256Trunc254Padded
+	case multicodec.Fr32Sha256Trunc254Padbintree.String():
+		code = multicodec.Fr32Sha256Trunc254Padbintree
+	case multicodec.Sha2_256.String():
+		code = multicodec.Sha2_256
+	default:
+		return nil, fmt.Errorf("unknown multihash name: %s", ph.Name)
 	}
 
 	hashBytes, err := hex.DecodeString(ph.Hash)
@@ -74,29 +82,77 @@ func (ph *PieceHash) mh() (multihash.Multihash, error) {
 		return nil, fmt.Errorf("failed to decode hash: %w", err)
 	}
 
-	return multihash.EncodeName(hashBytes, ph.HashName())
+	return multihash.Encode(hashBytes, uint64(code))
 }
 
-func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool, error) {
-	// commp, known, error
-	mh, err := ph.mh()
-	if err != nil {
-		return cid.Undef, false, fmt.Errorf("failed to decode hash: %w", err)
-	}
-
-	switch ph.HashName() {
+// commpvx returns the CID of a given Multihash and "Name" in this request. It performs a
+// translation from v2 to v1 as required, therefore will never return a CommPv2 CID.
+func (ph *PieceHash) commpvx(mh multihash.Multihash) (cid.Cid, error) {
+	switch ph.Name {
 	case multicodec.Sha2_256Trunc254Padded.String():
-		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), true, nil
+		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), nil
 	case multicodec.Fr32Sha256Trunc254Padbintree.String():
 		c2 := cid.NewCidV1(cid.Raw, mh)
 		c1, cidSize, err := commcid.PieceCidV1FromV2(c2)
 		if err != nil {
-			return cid.Undef, false, fmt.Errorf("failed to convert PieceCID v1 to v2: %w", err)
+			return cid.Undef, fmt.Errorf("failed to convert PieceCID v1 to v2: %w", err)
 		}
 		if cidSize != uint64(ph.Size) {
-			return cid.Undef, false, fmt.Errorf("piece size mismatch: CID size %d does not match check size %d", cidSize, ph.Size)
+			return cid.Undef, fmt.Errorf("piece size mismatch: CID size %d does not match check size %d", cidSize, ph.Size)
 		}
-		return c1, true, nil
+		return c1, nil
+	}
+	return cid.Undef, nil
+}
+
+// mh returns the native Multihash representation of the piece hash, but performs a translation from
+// CommPv2 to CommPv1 internally as required, therefore never returning a CommPv2 Multihash.
+func (ph *PieceHash) mh() (multihash.Multihash, error) {
+	mh, err := ph.mhNative()
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hash: %w", err)
+	}
+	cvx, err := ph.commpvx(mh)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute commp: %w", err)
+	}
+	return cvx.Hash(), nil
+}
+
+// maybeCommpv2 will return a CommPv2 from this PieceHash where possible - this will work as long as
+// the hash function is either sha2-256-trunc254-padded or fr32-sha256-trunc254-padbintree,
+// otherwise it will return an undefined CID.
+func (ph *PieceHash) maybeCommpv2() (cid.Cid, error) {
+	mh, err := ph.mhNative()
+	if err != nil {
+		return cid.Undef, fmt.Errorf("failed to decode hash: %w", err)
+	}
+
+	switch ph.Name {
+	case multicodec.Sha2_256Trunc254Padded.String():
+		c1 := cid.NewCidV1(cid.FilCommitmentUnsealed, mh)
+		dmh, err := multihash.Decode(c1.Hash())
+		if err != nil {
+			return cid.Undef, fmt.Errorf("failed to decode multihash: %w", err)
+		}
+		return commcid.DataCommitmentToPieceCidv2(dmh.Digest, uint64(ph.Size))
+	case multicodec.Fr32Sha256Trunc254Padbintree.String():
+		return cid.NewCidV1(cid.Raw, mh), nil
+	}
+
+	return cid.Undef, nil
+}
+
+func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool, error) {
+	mh, err := ph.mhNative()
+	if err != nil {
+		return cid.Undef, false, fmt.Errorf("failed to decode hash: %w", err)
+	}
+
+	if cvx, err := ph.commpvx(mh); err != nil {
+		return cid.Undef, false, fmt.Errorf("failed to compute commp: %w", err)
+	} else if cvx.Defined() {
+		return cvx, true, nil
 	}
 
 	var commpStr string
@@ -119,26 +175,16 @@ func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool
 }
 
 func (ph *PieceHash) maybeStaticCommp() (cid.Cid, bool) {
-	mh, err := ph.mh()
+	mh, err := ph.mhNative()
 	if err != nil {
 		return cid.Undef, false
 	}
 
-	switch ph.HashName() {
-	case multicodec.Sha2_256Trunc254Padded.String():
-		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), true
-	case multicodec.Fr32Sha256Trunc254Padbintree.String():
-		c2 := cid.NewCidV1(cid.Raw, mh)
-		c1, cidSize, err := commcid.PieceCidV1FromV2(c2)
-		if err != nil {
-			log.Errorw("Failed to convert PieceCID v1 to v2", "error", err)
-			return cid.Undef, false
-		}
-		if cidSize != uint64(ph.Size) {
-			log.Warnw("Piece size mismatch", "cidSize", cidSize, "checkSize", ph.Size)
-			return cid.Undef, false
-		}
-		return c1, true
+	if cvx, err := ph.commpvx(mh); err != nil {
+		log.Errorw("Failed to compute commp", "error", err)
+		return cid.Undef, false
+	} else if cvx.Defined() {
+		return cvx, true
 	}
 
 	return cid.Undef, false
@@ -182,6 +228,17 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 	var responseStatus int
 
 	_, err = p.db.BeginTransaction(ctx, func(tx *harmonydb.Tx) (bool, error) {
+		reqCid, _, err := req.Check.commp(ctx, p.db)
+		if err != nil {
+			return false, fmt.Errorf("failed to get commp CID: %w", err)
+		} else if !reqCid.Defined() {
+			return false, fmt.Errorf("commp CID not discoverable")
+		}
+		dmh, err := multihash.Decode(reqCid.Hash())
+		if err != nil {
+			return false, fmt.Errorf("failed to decode multihash: %w", err)
+		}
+
 		if havePieceCid {
 			// Check if a 'parked_pieces' entry exists for the given 'piece_cid'
 			var parkedPieceID int64
@@ -209,7 +266,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 				_, err = tx.Exec(`
                 INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, piece_ref, check_hash_codec, check_hash, check_size)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            `, uploadUUID.String(), serviceID, pieceCid, req.Notify, parkedPieceRefID, req.Check.HashName(), must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
+            `, uploadUUID.String(), serviceID, pieceCid, req.Notify, parkedPieceRefID, req.Check.HashName(), dmh.Digest, req.Check.Size)
 				if err != nil {
 					return false, fmt.Errorf("failed to insert into pdp_piece_uploads: %w", err)
 				}
@@ -232,7 +289,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`
             INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, check_hash_codec, check_hash, check_size)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `, uploadUUID.String(), serviceID, pieceCidStr, req.Notify, req.Check.HashName(), must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
+        `, uploadUUID.String(), serviceID, pieceCidStr, req.Notify, req.Check.HashName(), dmh.Digest, req.Check.Size)
 		if err != nil {
 			return false, fmt.Errorf("failed to store upload request in database: %w", err)
 		}
@@ -527,10 +584,19 @@ func (p *PDPService) handleFindPiece(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pieceCidv2, err := req.maybeCommpv2()
+	if err != nil {
+		http.Error(w, "Failed to get piece CID v2: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !pieceCidv2.Defined() {
+		pieceCidv2 = pieceCid // Probably a SHA2-256, roll with it
+	}
+
 	response := struct {
 		PieceCID string `json:"pieceCid"`
 	}{
-		PieceCID: pieceCid.String(),
+		PieceCID: pieceCidv2.String(),
 	}
 
 	// encode response
