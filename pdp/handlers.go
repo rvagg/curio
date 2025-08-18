@@ -899,12 +899,12 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			return
 		}
 
-		/*
-			// sanity check that height and totalSize match
-			computedHeight := bits.LeadingZeros64(totalSize-1) - 5
-			if computedHeight != int(height) {
-				http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d for total size %d", computedHeight, height, totalSize), http.StatusBadRequest)
-			}
+		/* TODO: this doesn't work, do we need it?
+		// sanity check that height and totalSize match
+		computedHeight := bits.LeadingZeros64(totalSize-1) - 5
+		if computedHeight != int(height) {
+			http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d for total size %d", computedHeight, height, totalSize), http.StatusBadRequest)
+		}
 		*/
 
 		// Prepare PieceData for Ethereum transaction

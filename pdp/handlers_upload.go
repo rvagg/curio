@@ -85,9 +85,9 @@ func (ph *PieceHash) mhNative() (multihash.Multihash, error) {
 	return multihash.Encode(hashBytes, uint64(code))
 }
 
-// commpvx returns the CID of a given Multihash and "Name" in this request. It performs a
+// commpv1 returns the CID of a given Multihash and "Name" in this request. It performs a
 // translation from v2 to v1 as required, therefore will never return a CommPv2 CID.
-func (ph *PieceHash) commpvx(mh multihash.Multihash) (cid.Cid, error) {
+func (ph *PieceHash) commpv1(mh multihash.Multihash) (cid.Cid, error) {
 	switch ph.Name {
 	case multicodec.Sha2_256Trunc254Padded.String():
 		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), nil
@@ -112,7 +112,7 @@ func (ph *PieceHash) mh() (multihash.Multihash, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode hash: %w", err)
 	}
-	cvx, err := ph.commpvx(mh)
+	cvx, err := ph.commpv1(mh)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute commp: %w", err)
 	}
@@ -149,7 +149,7 @@ func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool
 		return cid.Undef, false, fmt.Errorf("failed to decode hash: %w", err)
 	}
 
-	if cvx, err := ph.commpvx(mh); err != nil {
+	if cvx, err := ph.commpv1(mh); err != nil {
 		return cid.Undef, false, fmt.Errorf("failed to compute commp: %w", err)
 	} else if cvx.Defined() {
 		return cvx, true, nil
@@ -180,7 +180,7 @@ func (ph *PieceHash) maybeStaticCommp() (cid.Cid, bool) {
 		return cid.Undef, false
 	}
 
-	if cvx, err := ph.commpvx(mh); err != nil {
+	if cvx, err := ph.commpv1(mh); err != nil {
 		log.Errorw("Failed to compute commp", "error", err)
 		return cid.Undef, false
 	} else if cvx.Defined() {
@@ -556,9 +556,11 @@ func (p *PDPService) handleFindPiece(w http.ResponseWriter, r *http.Request) {
 		Size: size,
 	}
 
+	log.Infof("Finding piece with hash %s, size %d, name %s", req.Hash, req.Size, req.Name)
+
 	ctx := r.Context()
 
-	pieceCid, havePieceCid, err := req.commp(ctx, p.db)
+	pieceCid, havePieceCid, err := req.commp(ctx, p.db) // CommPv1
 	if err != nil {
 		http.Error(w, "Failed to process request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -579,6 +581,7 @@ func (p *PDPService) handleFindPiece(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
+	log.Infof("Found %d parked pieces for piece CID %s", count, pieceCid.String())
 	if count == 0 {
 		http.NotFound(w, r)
 		return
