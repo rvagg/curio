@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
 	logger "github.com/ipfs/go-log/v2"
+	"github.com/multiformats/go-multicodec"
 	"github.com/multiformats/go-multihash"
 	mhreg "github.com/multiformats/go-multihash/core"
 	"github.com/snadrus/must"
@@ -40,6 +41,7 @@ var PieceSizeLimit = abi.PaddedPieceSize(proof.MaxMemtreeSize).Unpadded()
 type PieceHash struct {
 	// Name of the hash function used
 	// sha2-256-trunc254-padded - CommP
+	// fr32-sha256-trunc254-padbintree - CommPv2
 	// sha2-256 - Blob sha256
 	Name string `json:"name"`
 
@@ -54,10 +56,17 @@ func (ph *PieceHash) Set() bool {
 	return ph.Name != "" && ph.Hash != "" && ph.Size > 0
 }
 
+func (ph *PieceHash) HashName() string {
+	if ph.Name == multicodec.Fr32Sha256Trunc254Padbintree.String() {
+		return multicodec.Sha2_256Trunc254Padded.String()
+	}
+	return ph.Name
+}
+
 func (ph *PieceHash) mh() (multihash.Multihash, error) {
-	_, ok := multihash.Names[ph.Name]
+	_, ok := multihash.Names[ph.HashName()]
 	if !ok {
-		return nil, fmt.Errorf("hash function name not recognized: %s", ph.Name)
+		return nil, fmt.Errorf("hash function name not recognized: %s", ph.HashName())
 	}
 
 	hashBytes, err := hex.DecodeString(ph.Hash)
@@ -65,7 +74,7 @@ func (ph *PieceHash) mh() (multihash.Multihash, error) {
 		return nil, fmt.Errorf("failed to decode hash: %w", err)
 	}
 
-	return multihash.EncodeName(hashBytes, ph.Name)
+	return multihash.EncodeName(hashBytes, ph.HashName())
 }
 
 func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool, error) {
@@ -75,8 +84,19 @@ func (ph *PieceHash) commp(ctx context.Context, db *harmonydb.DB) (cid.Cid, bool
 		return cid.Undef, false, fmt.Errorf("failed to decode hash: %w", err)
 	}
 
-	if ph.Name == multihash.Codes[multihash.SHA2_256_TRUNC254_PADDED] {
+	switch ph.HashName() {
+	case multicodec.Sha2_256Trunc254Padded.String():
 		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), true, nil
+	case multicodec.Fr32Sha256Trunc254Padbintree.String():
+		c2 := cid.NewCidV1(cid.Raw, mh)
+		c1, cidSize, err := commcid.PieceCidV1FromV2(c2)
+		if err != nil {
+			return cid.Undef, false, fmt.Errorf("failed to convert PieceCID v1 to v2: %w", err)
+		}
+		if cidSize != uint64(ph.Size) {
+			return cid.Undef, false, fmt.Errorf("piece size mismatch: CID size %d does not match check size %d", cidSize, ph.Size)
+		}
+		return c1, true, nil
 	}
 
 	var commpStr string
@@ -104,8 +124,21 @@ func (ph *PieceHash) maybeStaticCommp() (cid.Cid, bool) {
 		return cid.Undef, false
 	}
 
-	if ph.Name == multihash.Codes[multihash.SHA2_256_TRUNC254_PADDED] {
+	switch ph.HashName() {
+	case multicodec.Sha2_256Trunc254Padded.String():
 		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), true
+	case multicodec.Fr32Sha256Trunc254Padbintree.String():
+		c2 := cid.NewCidV1(cid.Raw, mh)
+		c1, cidSize, err := commcid.PieceCidV1FromV2(c2)
+		if err != nil {
+			log.Errorw("Failed to convert PieceCID v1 to v2", "error", err)
+			return cid.Undef, false
+		}
+		if cidSize != uint64(ph.Size) {
+			log.Warnw("Piece size mismatch", "cidSize", cidSize, "checkSize", ph.Size)
+			return cid.Undef, false
+		}
+		return c1, true
 	}
 
 	return cid.Undef, false
@@ -176,7 +209,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 				_, err = tx.Exec(`
                 INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, piece_ref, check_hash_codec, check_hash, check_size)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            `, uploadUUID.String(), serviceID, pieceCid, req.Notify, parkedPieceRefID, req.Check.Name, must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
+            `, uploadUUID.String(), serviceID, pieceCid, req.Notify, parkedPieceRefID, req.Check.HashName(), must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
 				if err != nil {
 					return false, fmt.Errorf("failed to insert into pdp_piece_uploads: %w", err)
 				}
@@ -199,9 +232,9 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`
             INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, check_hash_codec, check_hash, check_size)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `, uploadUUID.String(), serviceID, pieceCidStr, req.Notify, req.Check.Name, must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
+        `, uploadUUID.String(), serviceID, pieceCidStr, req.Notify, req.Check.HashName(), must.One(hex.DecodeString(req.Check.Hash)), req.Check.Size)
 		if err != nil {
-			return false, fmt.Errorf("Failed to store upload request in database: %w", err)
+			return false, fmt.Errorf("failed to store upload request in database: %w", err)
 		}
 
 		// Create a location URL where the piece data can be uploaded via PUT
@@ -210,7 +243,6 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 
 		return true, nil // Commit the transaction
 	}, harmonydb.OptionRetry())
-
 	if err != nil {
 		http.Error(w, "Failed to process request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -352,7 +384,7 @@ func (p *PDPService) handlePieceUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var outHash = digest
+	outHash := digest
 	if vhash != nil {
 		outHash = vhash.Sum(nil)
 	}
@@ -382,7 +414,6 @@ func (p *PDPService) handlePieceUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	didCommit, err := p.db.BeginTransaction(ctx, func(tx *harmonydb.Tx) (bool, error) {
-
 		// 1. Create a long-term parked piece entry
 		var parkedPieceID int64
 		err := tx.QueryRow(`
