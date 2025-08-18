@@ -498,10 +498,11 @@ func (p *PDPService) handleGetDataSet(w http.ResponseWriter, r *http.Request) {
 		PieceCid       string `db:"piece"`
 		SubPieceCID    string `db:"sub_piece"`
 		SubPieceOffset int64  `db:"sub_piece_offset"`
+		SubPieceSize   int64  `db:"sub_piece_size"`
 	}
 
 	err = p.db.Select(ctx, &pieces, `
-        SELECT piece_id, piece, sub_piece, sub_piece_offset
+        SELECT piece_id, piece, sub_piece, sub_piece_offset, sub_piece_size
         FROM pdp_data_set_pieces
         WHERE data_set = $1
         ORDER BY piece_id, sub_piece_offset
@@ -541,12 +542,29 @@ func (p *PDPService) handleGetDataSet(w http.ResponseWriter, r *http.Request) {
 		Pieces:             []PieceEntry{}, // Initialize as empty array, not nil
 	}
 
+	pieceSize := make(map[string]int64)
+	for _, piece := range pieces {
+		pieceSize[piece.PieceCid] += piece.SubPieceSize
+	}
+
 	// Convert pieces to the desired JSON format
 	for _, piece := range pieces {
+		// TODO: this could be cached per piece since we do this for every sub-piece
+		psize := pieceSize[piece.PieceCid]
+		pcv2, err := asPieceCIDv2(piece.PieceCid, uint64(psize))
+		if err != nil {
+			http.Error(w, "Invalid PieceCID: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		spcv2, err := asPieceCIDv2(piece.SubPieceCID, uint64(piece.SubPieceSize))
+		if err != nil {
+			http.Error(w, "Invalid SubPieceCID: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		response.Pieces = append(response.Pieces, PieceEntry{
 			PieceID:        piece.PieceID,
-			PieceCID:       piece.PieceCid,
-			SubPieceCID:    piece.SubPieceCID,
+			PieceCID:       pcv2.String(),
+			SubPieceCID:    spcv2.String(),
 			SubPieceOffset: piece.SubPieceOffset,
 		})
 	}
@@ -1429,6 +1447,17 @@ func asPieceCIDv1(cidStr string) (cid.Cid, error) {
 	if pieceCid.Prefix().MhType == uint64(multicodec.Fr32Sha256Trunc254Padbintree) {
 		c1, _, err := commcid.PieceCidV1FromV2(pieceCid)
 		return c1, err
+	}
+	return pieceCid, nil
+}
+
+func asPieceCIDv2(cidStr string, size uint64) (cid.Cid, error) {
+	pieceCid, err := cid.Decode(cidStr)
+	if err != nil {
+		return cid.Undef, fmt.Errorf("failed to decode subPieceCid: %w", err)
+	}
+	if pieceCid.Prefix().MhType == uint64(multicodec.Sha2_256Trunc254Padded) {
+		return commcid.PieceCidV2FromV1(pieceCid, size)
 	}
 	return pieceCid, nil
 }
