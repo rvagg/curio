@@ -202,6 +202,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 	}
 	pieceCid, size, err := asPieceCIDv2(req.PieceCID, 0)
 	if err != nil {
+		log.Warnw("Failed to parse piece CID", "error", err, "pieceCid", req.PieceCID)
 		http.Error(w, "Invalid request body: invalid pieceCid", http.StatusBadRequest)
 		return
 	}
