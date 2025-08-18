@@ -93,12 +93,9 @@ func (ph *PieceHash) commpv1(mh multihash.Multihash) (cid.Cid, error) {
 		return cid.NewCidV1(cid.FilCommitmentUnsealed, mh), nil
 	case multicodec.Fr32Sha256Trunc254Padbintree.String():
 		c2 := cid.NewCidV1(cid.Raw, mh)
-		c1, cidSize, err := commcid.PieceCidV1FromV2(c2)
+		c1, _, err := commcid.PieceCidV1FromV2(c2)
 		if err != nil {
 			return cid.Undef, fmt.Errorf("failed to convert PieceCID v1 to v2: %w", err)
-		}
-		if cidSize != uint64(ph.Size) {
-			return cid.Undef, fmt.Errorf("piece size mismatch: CID size %d does not match check size %d", cidSize, ph.Size)
 		}
 		return c1, nil
 	}
