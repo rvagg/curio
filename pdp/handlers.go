@@ -892,7 +892,7 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			}
 
 			prevSubPieceSize = subPieceInfo.PaddedSize
-			totalSize += uint64(subPieceInfo.PaddedSize)
+			totalSize += uint64(subPieceInfo.RawSize)
 		}
 		// sanity check that the rawSize in the CommPv2 matches the totalSize of the subPieces
 		if rawSize != totalSize {
