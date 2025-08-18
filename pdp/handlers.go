@@ -894,11 +894,16 @@ func (p *PDPService) handleAddPieceToDataSet(w http.ResponseWriter, r *http.Requ
 			prevSubPieceSize = subPieceInfo.PaddedSize
 			totalSize += uint64(subPieceInfo.PaddedSize)
 		}
+		// sanity check that the rawSize in the CommPv2 matches the totalSize of the subPieces
+		if rawSize != totalSize {
+			http.Error(w, fmt.Sprintf("Raw size miss-match: expected %d, got %d", totalSize, rawSize), http.StatusBadRequest)
+			return
+		}
+
 		// sanity check that height and totalSize match
-		//
 		computedHeight := bits.LeadingZeros64(totalSize-1) - 5
 		if computedHeight != int(height) {
-			http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d", computedHeight, height), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("Height miss-match: expected %d, got %d for total size %d", computedHeight, height, totalSize), http.StatusBadRequest)
 		}
 
 		// Prepare PieceData for Ethereum transaction
