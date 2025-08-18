@@ -562,6 +562,7 @@ func (p *PDPService) handleFindPiece(w http.ResponseWriter, r *http.Request) {
 
 	pieceCid, havePieceCid, err := req.commp(ctx, p.db) // CommPv1
 	if err != nil {
+		log.Errorf("Failed to process request: %s", err.Error())
 		http.Error(w, "Failed to process request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
