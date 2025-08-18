@@ -193,7 +193,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req struct {
-		PieceCID string `json:"pieceCid"`
+		PieceCID string `json:"cid"`
 		Notify   string `json:"notify,omitempty"`
 	}
 	if err = json.NewDecoder(r.Body).Decode(&req); err != nil {
