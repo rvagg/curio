@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -200,15 +201,18 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	pieceCid, size, err := asPieceCIDv2(req.PieceCID, 0)
+	pieceCidV2, size, err := asPieceCIDv2(req.PieceCID, 0)
 	if err != nil {
-		log.Warnw("Failed to parse piece CID", "error", err, "pieceCid", req.PieceCID)
 		http.Error(w, "Invalid request body: invalid pieceCid", http.StatusBadRequest)
 		return
 	}
-
 	if size > uint64(PieceSizeLimit) {
 		http.Error(w, "Piece size exceeds the maximum allowed size", http.StatusBadRequest)
+		return
+	}
+	pieceCidV1, _, err := commcid.PieceCidV1FromV2(pieceCidV2)
+	if err != nil {
+		http.Error(w, "Invalid request body: invalid pieceCid", http.StatusBadRequest)
 		return
 	}
 
@@ -220,7 +224,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 	var responseStatus int
 
 	_, err = p.db.BeginTransaction(ctx, func(tx *harmonydb.Tx) (bool, error) {
-		dmh, err := multihash.Decode(pieceCid.Hash())
+		dmh, err := multihash.Decode(pieceCidV1.Hash())
 		if err != nil {
 			return false, fmt.Errorf("failed to decode multihash: %w", err)
 		}
@@ -229,7 +233,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 		var parkedPieceID int64
 		err = tx.QueryRow(`
             SELECT id FROM parked_pieces WHERE piece_cid = $1 AND long_term = TRUE AND complete = TRUE
-        `, pieceCid).Scan(&parkedPieceID)
+        `, pieceCidV1.String()).Scan(&parkedPieceID)
 		if err != nil && err != pgx.ErrNoRows {
 			return false, fmt.Errorf("failed to query parked_pieces: %w", err)
 		}
@@ -251,7 +255,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 			_, err = tx.Exec(`
                 INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, piece_ref, check_hash_codec, check_hash, check_size)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            `, uploadUUID.String(), serviceID, pieceCid, req.Notify, parkedPieceRefID, multicodec.Sha2_256Trunc254Padded.String(), dmh.Digest, size)
+            `, uploadUUID.String(), serviceID, pieceCidV1.String(), req.Notify, parkedPieceRefID, multicodec.Sha2_256Trunc254Padded.String(), dmh.Digest, size)
 			if err != nil {
 				return false, fmt.Errorf("failed to insert into pdp_piece_uploads: %w", err)
 			}
@@ -259,6 +263,21 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 			responseStatus = http.StatusOK
 			return true, nil // Commit the transaction
 		}
+
+		// Piece does not exist, proceed to create a new upload request
+		uploadUUID = uuid.New()
+
+		_, err = tx.Exec(`
+       INSERT INTO pdp_piece_uploads (id, service, piece_cid, notify_url, check_hash_codec, check_hash, check_size)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+   `, uploadUUID.String(), serviceID, pieceCidV1.String(), req.Notify, multicodec.Sha2_256Trunc254Padded.String(), dmh.Digest, size)
+		if err != nil {
+			return false, fmt.Errorf("Failed to store upload request in database: %w", err)
+		}
+
+		// Create a location URL where the piece data can be uploaded via PUT
+		uploadURL = path.Join(PDPRoutePath, "/piece/upload", uploadUUID.String())
+		responseStatus = http.StatusCreated
 
 		return true, nil // Commit the transaction
 	}, harmonydb.OptionRetry())
@@ -275,7 +294,7 @@ func (p *PDPService) handlePiecePost(w http.ResponseWriter, r *http.Request) {
 		// Return 200 OK with the pieceCID
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"pieceCID": pieceCid.String()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"pieceCid": pieceCidV2.String()})
 	} else {
 		// Should not reach here
 		http.Error(w, "Unexpected error", http.StatusInternalServerError)

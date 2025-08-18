@@ -1448,7 +1448,7 @@ func (p *PDPService) handleGetDataSetPiece(w http.ResponseWriter, r *http.Reques
 func asPieceCIDv1(cidStr string) (cid.Cid, error) {
 	pieceCid, err := cid.Decode(cidStr)
 	if err != nil {
-		return cid.Undef, fmt.Errorf("failed to decode subPieceCid: %w", err)
+		return cid.Undef, fmt.Errorf("failed to decode PieceCID: %w", err)
 	}
 	if pieceCid.Prefix().MhType == uint64(multicodec.Fr32Sha256Trunc254Padbintree) {
 		c1, _, err := commcid.PieceCidV1FromV2(pieceCid)
