@@ -3,6 +3,7 @@ package pdp
 import (
 	"bytes"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -260,6 +261,7 @@ func (p *PDPService) handlePieceUpload(w http.ResponseWriter, r *http.Request) {
 	if !bytes.Equal(outHash, dmh.Digest) {
 		// Remove the stash file as the data is invalid
 		_ = p.storage.StashRemove(ctx, stashID)
+		log.Warnw("Computed hash does not match expected hash", "computed", hex.EncodeToString(outHash), "expected", hex.EncodeToString(dmh.Digest), "pieceCid", pieceCid.String())
 		http.Error(w, "Computed hash does not match expected hash", http.StatusBadRequest)
 		return
 	}
